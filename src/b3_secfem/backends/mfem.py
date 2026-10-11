@@ -401,17 +401,29 @@ def solve(inp: SectionInput) -> SectionResult:
     d1: dict[int, np.ndarray] = {}
     for i in STAGE1_MODES:
         d1[i] = ksolve(-(Cmat @ d0[i]))
-    d1[0] = d1[4]  # Vx chain reuses My bending warping
-    d1[1] = d1[3]  # Vy chain reuses Mx bending warping
+    # Shear chains as ANBA4 (anbax.compute): c0 translation, c1 bending kinematic, c2 bending warping,
+    # c3 shear warping, E c_k = M c_{k-2} - H c_{k-1}. Before c3, c1/c2 are corrected by the axial/torsion
+    # chain combination that makes the RHS orthogonal to the axial and torsion rigid modes (the 2x2
+    # a x = b step); the old chain let the KKT multipliers absorb that part (K00 1e2-1e4x low with UD caps).
+    def _next(prev, cur):
+        return Mmat @ prev - (Cmat @ cur - Cmat.T @ cur)
 
-    # Stage 2: E d2 = Mmat d0 - (Cmat - Cmatᵀ) d1.
+    ax0, to0 = d0[2], d0[5]
+    va, vt = _next(ax0, d1[2]), _next(to0, d1[5])
+    A2 = np.array([[va @ ax0, vt @ ax0], [va @ to0, vt @ to0]])
+    a_dofs = {2: d0[2], 3: d0[3], 4: d0[4], 5: d0[5]}
+    b_dofs = {2: d1[2], 3: d1[3], 4: d1[4], 5: d1[5]}
     d2: dict[int, np.ndarray] = {}
-    for i in STAGE2_MODES:
-        d2[i] = ksolve(Mmat @ d0[i] - (Cmat @ d1[i] - Cmat.T @ d1[i]))
-
-    # Total-strain field specs per mode: eps_total = eps_z(a) + eps_xy(b).
-    a_dofs = {0: d1[4], 1: d1[3], 2: d0[2], 3: d0[3], 4: d0[4], 5: d0[5]}
-    b_dofs = {0: d2[0], 1: d2[1], 2: d1[2], 3: d1[3], 4: d1[4], 5: d1[5]}
+    for sh, bend in ((0, 4), (1, 3)):
+        c1, c2 = d0[bend].copy(), d1[bend].copy()
+        res = _next(c1, c2)
+        xc = np.linalg.solve(A2, [res @ ax0, res @ to0])
+        c2 -= xc[0] * d1[2] + xc[1] * d1[5]
+        c1 -= xc[0] * ax0 + xc[1] * to0
+        d2[sh] = ksolve(_next(c1, c2))
+        d1[sh] = c2
+        a_dofs[bend], b_dofs[bend] = c1, c2
+        a_dofs[sh], b_dofs[sh] = c2, d2[sh]
 
     R_mat, S_mat = _assemble_R_S(mesh, fes, C_per_cell, a_dofs, b_dofs)
     K = R_mat @ np.linalg.solve(S_mat, R_mat.T)

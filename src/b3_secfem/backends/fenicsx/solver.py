@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from ...config import SectionInput
-from ...kinematics import voigt_strain
+from ...kinematics import epsilon_z_voigt, voigt_strain
 from ...inertia import assemble_mass
 from ...mesh import read_xdmf
 from ...post import compute_centres
@@ -44,7 +44,8 @@ def solve(inp: SectionInput) -> SectionResult:
     """Run the cross-section chain solve and return K, M, centres."""
     import ufl
     from dolfinx import fem
-    from dolfinx.fem.petsc import assemble_matrix
+    from dolfinx.fem.petsc import assemble_matrix, assemble_vector
+    from petsc4py import PETSc
 
     mesh, cell_tags = _load_mesh(inp)
     n_cells = mesh.topology.index_map(mesh.topology.dim).size_local
@@ -136,16 +137,59 @@ def solve(inp: SectionInput) -> SectionResult:
             V, ksp, fem.form(rhs), nullspace, name=f"d1_{i}"
         )
 
-    # Shear chains share d_1 with the corresponding bending chain
-    d1_fields[0] = d1_fields[4]  # Vx chain uses M_y bending warping
-    d1_fields[1] = d1_fields[3]  # Vy chain uses M_x bending warping
+    # Integral rigid-mode gauge on every warping solution (role of ANBA's Lagrange multipliers):
+    # int u dA = 0 and int (x' u_y - y' u_x) dA = 0 about the area centroid.
+    gauge = _make_gauge(V, mesh)
+    for i in STAGE1_MODES:
+        gauge(d1_fields[i])
 
-    # Stage 2: solve d_2 for transverse shear.
-    for i in STAGE2_MODES:
-        rhs = chain_rhs_stage2(C_func, v, d0_fields[i], d1_fields[i])
-        d2_fields[i] = _solve_with_nullspace(
-            V, ksp, fem.form(rhs), nullspace, name=f"d2_{i}"
-        )
+    # Shear chains (ANBA4 / Giavotto-Morandini). x chain: c0 = translation, c1 = bending kinematic,
+    # c2 = bending warping (= d1_fields[4]), c3 = shear warping; E c_k = M c_{k-2} - H c_{k-1}.
+    # The RHS of c3 must be orthogonal to the axial and torsion rigid modes: as in anbax.compute()
+    # (the 2x2 "a x = b" step) c1 and c2 are corrected by combinations of the axial/torsion chains.
+    # The previous simplified chain projected that unsolvable part away instead, which collapsed Vx
+    # with stiff UD caps (K00 low by up to 1e4 vs ANBA).
+    def _rhs(prev, cur):
+        b = assemble_vector(fem.form(chain_rhs_stage2(C_func, v, prev, cur)))
+        b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+        return b
+
+    def _kin(mode):
+        f = fem.Function(V)
+        z = lambda X: np.zeros(X.shape[1])  # noqa: E731
+        fn = {2: lambda X: np.vstack([z(X), z(X), np.ones(X.shape[1])]),
+              3: lambda X: np.vstack([z(X), z(X), -X[1]]),
+              4: lambda X: np.vstack([z(X), z(X), X[0]]),
+              5: lambda X: np.vstack([-X[1], X[0], z(X)])}[mode]
+        f.interpolate(fn)  # nodal interpolant of d0_kinematic(mode) (exact for P/Q >= 1)
+        return f
+
+    ax0, to0 = _kin(2), _kin(5)
+    va, vt = _rhs(ax0, d1_fields[2]), _rhs(to0, d1_fields[5])
+    A2 = np.array([[va.dot(ax0.x.petsc_vec), vt.dot(ax0.x.petsc_vec)],
+                   [va.dot(to0.x.petsc_vec), vt.dot(to0.x.petsc_vec)]])
+    mode_fields: list[Any] = [None] * 6
+    for m in (2, 3, 4, 5):
+        mode_fields[m] = (d0_kinematic(m, x), d1_fields[m])
+    for sh, bend in ((0, 4), (1, 3)):
+        c1 = _kin(bend)
+        c2 = fem.Function(V, name=f"d1_{bend}_corrected")
+        c2.x.array[:] = d1_fields[bend].x.array
+        res = _rhs(c1, c2)
+        xc = np.linalg.solve(A2, [res.dot(ax0.x.petsc_vec), res.dot(to0.x.petsc_vec)])
+        c2.x.array[:] -= xc[0] * d1_fields[2].x.array + xc[1] * d1_fields[5].x.array
+        c1.x.array[:] -= xc[0] * ax0.x.array + xc[1] * to0.x.array
+        c2.x.scatter_forward(); c1.x.scatter_forward()
+        b3 = _rhs(c1, c2)
+        nullspace.remove(b3)
+        c3 = fem.Function(V, name=f"d2_{sh}")
+        ksp.solve(b3, c3.x.petsc_vec)
+        c3.x.scatter_forward()
+        gauge(c3)
+        d2_fields[sh] = c3
+        d1_fields[sh] = c2
+        mode_fields[bend] = (c1, c2)
+        mode_fields[sh] = (c2, c3)
 
     # 7th cell problem: section-averaged in-plane shear stiffness.
     # NOT a beam-level DOF -- computed and returned separately.
@@ -183,10 +227,7 @@ def solve(inp: SectionInput) -> SectionResult:
     K_section_xy = float(fem.assemble_scalar(fem.form(K_xy_form)))
 
     # Build total Voigt strain field for each mode.
-    eps_totals = {
-        i: total_strain_voigt(i, d0_fields[i], d1_fields[i], d2_fields.get(i))
-        for i in ALL_MODES
-    }
+    eps_totals = {i: epsilon_z_voigt(mode_fields[i][0]) + voigt_strain(mode_fields[i][1]) for i in ALL_MODES}
 
     # Resultant matrix R[a, i] = a-th generalised-force resultant of mode i.
     R_mat = _assemble_resultants(C_func, mesh, eps_totals)
@@ -220,6 +261,7 @@ def solve(inp: SectionInput) -> SectionResult:
         mass_center=centres["mass"],
         K_section_xy=K_section_xy,
         u_solutions=u_solutions,
+        mode_fields=mode_fields,
         inplane_shear_warping=w_xy,
         C_func=C_func,
         Cmat_func=Cmat_func,
@@ -403,3 +445,41 @@ def _build_nullspace(V: Any):
     basis_vecs = [f.x.petsc_vec for f in funcs]
     nullspace = PETSc.NullSpace().create(vectors=basis_vecs, comm=V.mesh.comm)
     return nullspace, funcs
+
+
+def _make_gauge(V: Any, mesh: Any):
+    """Return f(u) that removes the rigid part of a warping Function by integral constraints:
+    zero mean displacement and zero mean rotation about the area centroid (scale-consistent;
+    the Lagrange-multiplier gauge of ANBA without enlarging the system)."""
+    import ufl
+    from dolfinx import fem
+    from dolfinx.fem.petsc import assemble_vector
+
+    x = ufl.SpatialCoordinate(mesh)
+    one = fem.Constant(mesh, 1.0)
+    A = fem.assemble_scalar(fem.form(one * ufl.dx))
+    xg = fem.assemble_scalar(fem.form(x[0] * ufl.dx)) / A
+    yg = fem.assemble_scalar(fem.form(x[1] * ufl.dx)) / A
+    J = fem.assemble_scalar(fem.form(((x[0] - xg) ** 2 + (x[1] - yg) ** 2) * ufl.dx))
+    v = ufl.TestFunction(V)
+    w = []
+    for e in (ufl.as_vector([1.0, 0, 0]), ufl.as_vector([0, 1.0, 0]), ufl.as_vector([0, 0, 1.0]),
+              ufl.as_vector([-(x[1] - yg), x[0] - xg, 0])):
+        b = assemble_vector(fem.form(ufl.dot(v, e) * ufl.dx))
+        b.assemble()
+        w.append(b.array.copy())
+    coords = V.tabulate_dof_coordinates()
+    bs = V.dofmap.index_map_bs
+    n_own = V.dofmap.index_map.size_local
+
+    def gauge(f):
+        arr = f.x.array.reshape(-1, bs)
+        own = f.x.array[: n_own * bs]
+        tx, ty, tz = (wi @ own / A for wi in w[:3])
+        rot = w[3] @ own / J
+        arr[:, 0] -= tx - rot * (coords[:, 1] - yg)
+        arr[:, 1] -= ty + rot * (coords[:, 0] - xg)
+        arr[:, 2] -= tz
+        f.x.scatter_forward()
+
+    return gauge
