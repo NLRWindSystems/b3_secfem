@@ -5,6 +5,7 @@ Before the ANBA shear-chain port the chordwise shear K00 was 1e2-1e4x too low he
 correction of the shear chain was missing, the unsolvable RHS part was projected away). Also checks
 exact similarity scaling: K/s^2 (forces) and K/s^4 (moments) on the same mesh scaled by s.
 """
+
 import gzip
 import json
 from pathlib import Path
@@ -27,12 +28,24 @@ def _load(name):
 
 
 def _solve(d, tmp_path, scale=1.0):
-    regs = {int(k): RegionMat(material=OrthotropicMaterial(**r["material"]), beta_deg=r["beta_deg"],
-                              alpha_deg=r["alpha_deg"]) for k, r in d["regions"].items()}
+    regs = {
+        int(k): RegionMat(
+            material=OrthotropicMaterial(**r["material"]),
+            beta_deg=r["beta_deg"],
+            alpha_deg=r["alpha_deg"],
+        )
+        for k, r in d["regions"].items()
+    }
     p = tmp_path / f"s{scale}.xdmf"
-    write_quad_xdmf(str(p), np.asarray(d["points"]) * scale, np.asarray(d["quads"]),
-                    cell_tags=np.asarray(d["tags"], np.int32))
-    return np.asarray(solve(SectionInput(mesh_path=p, region_materials=regs, linear_solver="lu")).K)
+    write_quad_xdmf(
+        str(p),
+        np.asarray(d["points"]) * scale,
+        np.asarray(d["quads"]),
+        cell_tags=np.asarray(d["tags"], np.int32),
+    )
+    return np.asarray(
+        solve(SectionInput(mesh_path=p, region_materials=regs, linear_solver="lu")).K
+    )
 
 
 @pytest.mark.parametrize("name", CASES)

@@ -27,7 +27,6 @@ from .forms import (
     d0_kinematic,
     inplane_shear_rhs_linear,
     stiffness_bilinear,
-    total_strain_voigt,
 )
 from .spaces import (
     fill_per_cell_density,
@@ -157,17 +156,25 @@ def solve(inp: SectionInput) -> SectionResult:
     def _kin(mode):
         f = fem.Function(V)
         z = lambda X: np.zeros(X.shape[1])  # noqa: E731
-        fn = {2: lambda X: np.vstack([z(X), z(X), np.ones(X.shape[1])]),
-              3: lambda X: np.vstack([z(X), z(X), -X[1]]),
-              4: lambda X: np.vstack([z(X), z(X), X[0]]),
-              5: lambda X: np.vstack([-X[1], X[0], z(X)])}[mode]
-        f.interpolate(fn)  # nodal interpolant of d0_kinematic(mode) (exact for P/Q >= 1)
+        fn = {
+            2: lambda X: np.vstack([z(X), z(X), np.ones(X.shape[1])]),
+            3: lambda X: np.vstack([z(X), z(X), -X[1]]),
+            4: lambda X: np.vstack([z(X), z(X), X[0]]),
+            5: lambda X: np.vstack([-X[1], X[0], z(X)]),
+        }[mode]
+        f.interpolate(
+            fn
+        )  # nodal interpolant of d0_kinematic(mode) (exact for P/Q >= 1)
         return f
 
     ax0, to0 = _kin(2), _kin(5)
     va, vt = _rhs(ax0, d1_fields[2]), _rhs(to0, d1_fields[5])
-    A2 = np.array([[va.dot(ax0.x.petsc_vec), vt.dot(ax0.x.petsc_vec)],
-                   [va.dot(to0.x.petsc_vec), vt.dot(to0.x.petsc_vec)]])
+    A2 = np.array(
+        [
+            [va.dot(ax0.x.petsc_vec), vt.dot(ax0.x.petsc_vec)],
+            [va.dot(to0.x.petsc_vec), vt.dot(to0.x.petsc_vec)],
+        ]
+    )
     mode_fields: list[Any] = [None] * 6
     for m in (2, 3, 4, 5):
         mode_fields[m] = (d0_kinematic(m, x), d1_fields[m])
@@ -179,7 +186,8 @@ def solve(inp: SectionInput) -> SectionResult:
         xc = np.linalg.solve(A2, [res.dot(ax0.x.petsc_vec), res.dot(to0.x.petsc_vec)])
         c2.x.array[:] -= xc[0] * d1_fields[2].x.array + xc[1] * d1_fields[5].x.array
         c1.x.array[:] -= xc[0] * ax0.x.array + xc[1] * to0.x.array
-        c2.x.scatter_forward(); c1.x.scatter_forward()
+        c2.x.scatter_forward()
+        c1.x.scatter_forward()
         b3 = _rhs(c1, c2)
         nullspace.remove(b3)
         c3 = fem.Function(V, name=f"d2_{sh}")
@@ -227,7 +235,10 @@ def solve(inp: SectionInput) -> SectionResult:
     K_section_xy = float(fem.assemble_scalar(fem.form(K_xy_form)))
 
     # Build total Voigt strain field for each mode.
-    eps_totals = {i: epsilon_z_voigt(mode_fields[i][0]) + voigt_strain(mode_fields[i][1]) for i in ALL_MODES}
+    eps_totals = {
+        i: epsilon_z_voigt(mode_fields[i][0]) + voigt_strain(mode_fields[i][1])
+        for i in ALL_MODES
+    }
 
     # Resultant matrix R[a, i] = a-th generalised-force resultant of mode i.
     R_mat = _assemble_resultants(C_func, mesh, eps_totals)
@@ -463,8 +474,12 @@ def _make_gauge(V: Any, mesh: Any):
     J = fem.assemble_scalar(fem.form(((x[0] - xg) ** 2 + (x[1] - yg) ** 2) * ufl.dx))
     v = ufl.TestFunction(V)
     w = []
-    for e in (ufl.as_vector([1.0, 0, 0]), ufl.as_vector([0, 1.0, 0]), ufl.as_vector([0, 0, 1.0]),
-              ufl.as_vector([-(x[1] - yg), x[0] - xg, 0])):
+    for e in (
+        ufl.as_vector([1.0, 0, 0]),
+        ufl.as_vector([0, 1.0, 0]),
+        ufl.as_vector([0, 0, 1.0]),
+        ufl.as_vector([-(x[1] - yg), x[0] - xg, 0]),
+    ):
         b = assemble_vector(fem.form(ufl.dot(v, e) * ufl.dx))
         b.assemble()
         w.append(b.array.copy())

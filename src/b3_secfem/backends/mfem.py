@@ -401,6 +401,7 @@ def solve(inp: SectionInput) -> SectionResult:
     d1: dict[int, np.ndarray] = {}
     for i in STAGE1_MODES:
         d1[i] = ksolve(-(Cmat @ d0[i]))
+
     # Shear chains as ANBA4 (anbax.compute): c0 translation, c1 bending kinematic, c2 bending warping,
     # c3 shear warping, E c_k = M c_{k-2} - H c_{k-1}. Before c3, c1/c2 are corrected by the axial/torsion
     # chain combination that makes the RHS orthogonal to the axial and torsion rigid modes (the 2x2
