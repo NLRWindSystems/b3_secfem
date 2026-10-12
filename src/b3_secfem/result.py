@@ -62,6 +62,9 @@ class SectionResult(BaseModel):
     """
 
     u_solutions: list[Any] | None = None
+    mode_fields: list[Any] | None = None
+    """Per mode ``(UP, U)``: total strain ``eps_z(UP) + eps_xy(U)`` (ANBA chain basis, fenicsx backend).
+    Shear modes use the corrected bending warping as UP; recovery uses these when present."""
     inplane_shear_warping: Any | None = None
     """Backend-specific warping field (dolfinx Function or mfem GridFunction)
     for the 7th in-plane-shear cell problem. Used by viz.plot_warping."""
