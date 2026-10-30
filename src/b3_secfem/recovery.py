@@ -161,7 +161,12 @@ def recover_strains(result: SectionResult) -> StrainField:
         if primary[i] is None:
             continue
         d0 = d0_kinematic(i, x)
-        if i in STAGE2_MODES:
+        if getattr(result, "mode_fields", None) is not None:
+            from .kinematics import epsilon_z_voigt, voigt_strain
+
+            up, uu = result.mode_fields[i]
+            eps_total = epsilon_z_voigt(up) + voigt_strain(uu)
+        elif i in STAGE2_MODES:
             # shear: d_1 is the corresponding bending warping
             bending_idx = 4 if i == 0 else 3
             d1 = primary[bending_idx]
@@ -169,7 +174,8 @@ def recover_strains(result: SectionResult) -> StrainField:
         else:
             d1 = primary[i]
             d2 = None
-        eps_total = total_strain_voigt(i, d0, d1, d2)
+        if getattr(result, "mode_fields", None) is None:
+            eps_total = total_strain_voigt(i, d0, d1, d2)
 
         form = fem.form(ufl.inner(v6, eps_total) * ufl.dx)
         b = assemble_vector(form)
