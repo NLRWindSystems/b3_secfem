@@ -125,6 +125,13 @@ tolerance in `tests/test_iso_rectangle.py`). Complex airfoils exhibit
 mesh-convergence differences versus gxbeam_section on the shear terms (as
 on torsion); these are documented in the cross-check driver and notes.
 
+Before extending each bending chain to transverse shear, both backends
+subtract its axial/torsion chain combination so the next right-hand side
+satisfies the rigid-mode solvability conditions. FEniCSx recovery retains
+these corrected lower-chain fields in `SectionResult.shear_d1_solutions`;
+using the uncorrected bending warping instead gives inconsistent recovered
+fields for off-axis anisotropic sections.
+
 The solver and visualization tools are serial-only (single MPI rank). Per-cell material assignment and recovery assume local cell counts match the input arrays. Parallel execution is not yet supported.
 
 See `notes/claude.md` for project context and `notes/theory.md` for the

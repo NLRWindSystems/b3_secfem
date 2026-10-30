@@ -283,3 +283,80 @@ def test_sigma_mat_consistent_with_local_constitutive_law(tmp_path):
             rtol=1e-6,
             atol=1e-6 * max(np.abs(ul.sigma_mat[k]).max(), 1e-30),
         )
+
+
+def test_off_axis_shear_and_recovery_match_anba(tmp_path):
+    """ANBA reference on eight P1 triangles with bending/torsion coupling."""
+    import basix.ufl
+    import ufl
+
+    coords = np.array([[x, y] for y in (-0.05, 0.0, 0.05) for x in (-0.05, 0.0, 0.05)])
+    cells = np.array(
+        [
+            [1, 4, 3],
+            [2, 5, 4],
+            [4, 7, 6],
+            [5, 8, 7],
+            [1, 3, 0],
+            [2, 4, 1],
+            [4, 6, 3],
+            [5, 7, 4],
+        ],
+        dtype=np.int64,
+    )
+    domain = ufl.Mesh(basix.ufl.element("Lagrange", "triangle", 1, shape=(2,)))
+    mesh = dmesh.create_mesh(MPI.COMM_WORLD, cells, domain, coords)
+    path = tmp_path / "off_axis.xdmf"
+    write_xdmf(path, mesh)
+    mat = OrthotropicMaterial(
+        E1=8.39e9,
+        E2=4.39e9,
+        E3=114.5e9,
+        G12=2.99e9,
+        G13=5.99e9,
+        G23=4.99e9,
+        nu12=0.4,
+        nu13=0.27 * 8.39 / 114.5,
+        nu23=0.1 * 4.39 / 114.5,
+        rho=1220.0,
+    )
+    res = solve(
+        SectionInput(
+            mesh_path=path,
+            region_materials={1: RegionMat(material=mat, alpha_deg=45.0)},
+            degree=1,
+        )
+    )
+
+    # SONATA orient=0/fiber=45 ANBA reference, in [Fx, Fy, Fz] order.
+    expected = np.array(
+        [
+            [1.2713808926972382e8, -4.6441818850009134e6, 1.0130028599300472e8],
+            [-4.6441818850009134e6, 3.7933938564060852e7, -4.2871625651007444e6],
+            [1.0130028599300472e8, -4.2871625651007444e6, 2.1858135311455321e8],
+        ]
+    )
+    np.testing.assert_allclose(res.K[:3, :3], expected, rtol=1e-6)
+
+    ul = recover_unit_load_strains(res)
+    n_cells = res.mesh.topology.index_map(2).size_local
+    centroids = dmesh.compute_midpoints(res.mesh, 2, np.arange(n_cells, dtype=np.int32))
+    order = np.lexsort((np.round(centroids[:, 1], 8), np.round(centroids[:, 0], 8)))
+    np.testing.assert_allclose(
+        ul.epsilon_mat[0, order, 2],
+        [
+            8.244192215117775e-10,
+            9.129732282620866e-10,
+            1.4488962683052202e-9,
+            1.585100683588848e-9,
+            1.5851006835888506e-9,
+            1.448896268305221e-9,
+            9.12973228262085e-10,
+            8.244192215117765e-10,
+        ],
+        rtol=1e-6,
+    )
+    mean_stress = np.average(ul.sigma_mat[2], axis=0, weights=ul.cell_areas)
+    np.testing.assert_allclose(
+        mean_stress, [50.0, 0.0, 50.0, 0.0, -50.0, 0.0], atol=1e-6
+    )

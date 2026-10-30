@@ -16,6 +16,8 @@ Stage 1 (modes 2..5: Fz, Mx, My, Mz)
 Stage 2 (modes 0, 1: Vx, Vy)
     d_0 = bending kinematic (same as M_y / M_x respectively)
     d_1 = bending warping   (already solved in Stage 1)
+    Remove the axial/torsion chain combination from d_0 and d_1 so
+    M d_0 - H d_1 is orthogonal to the axial/torsion rigid modes.
     d_2 = E^{-1} (M d_0 - H d_1)   the transverse-shear warping
 
 K assembly (resultant + energy):
@@ -165,12 +167,32 @@ def _fenicsx_solve(inp: SectionInput) -> SectionResult:
             V, ksp, fem.form(rhs), nullspace, name=f"d1_{i}"
         )
 
-    # Shear chains share d_1 with the corresponding bending chain
-    d1_fields[0] = d1_fields[4]  # Vx chain uses M_y bending warping
-    d1_fields[1] = d1_fields[3]  # Vy chain uses M_x bending warping
+    stage1_eps = {
+        i: total_strain_voigt(i, d0_fields[i], d1_fields[i], None) for i in STAGE1_MODES
+    }
+    stage1_R = _assemble_resultants(C_func, mesh, stage1_eps)
+    axial_torsion = (2, 5)
+    compatibility = stage1_R[np.ix_(axial_torsion, axial_torsion)]
 
-    # Stage 2: solve d_2 for transverse shear.
-    for i in STAGE2_MODES:
+    # As in ANBA and the MFEM backend, enforce chain solvability before
+    # projecting the shear RHS; projection alone discards physical coupling.
+    for i, bending_idx in ((0, 4), (1, 3)):
+        coefficients = np.linalg.solve(
+            compatibility, stage1_R[list(axial_torsion), bending_idx]
+        )
+        weights = fem.Constant(mesh, coefficients)
+        d0_fields[i] = (
+            d0_fields[bending_idx]
+            - weights[0] * d0_fields[2]
+            - weights[1] * d0_fields[5]
+        )
+        d1_fields[i] = fem.Function(V, name=f"shear_d1_{i}")
+        d1_fields[i].x.array[:] = (
+            d1_fields[bending_idx].x.array
+            - coefficients[0] * d1_fields[2].x.array
+            - coefficients[1] * d1_fields[5].x.array
+        )
+        d1_fields[i].x.scatter_forward()
         rhs = chain_rhs_stage2(C_func, v, d0_fields[i], d1_fields[i])
         d2_fields[i] = _solve_with_nullspace(
             V, ksp, fem.form(rhs), nullspace, name=f"d2_{i}"
@@ -249,6 +271,7 @@ def _fenicsx_solve(inp: SectionInput) -> SectionResult:
         mass_center=centres["mass"],
         K_section_xy=K_section_xy,
         u_solutions=u_solutions,
+        shear_d1_solutions=[d1_fields[i] for i in STAGE2_MODES],
         inplane_shear_warping=w_xy,
         C_func=C_func,
         Cmat_func=Cmat_func,
@@ -337,8 +360,8 @@ def _assemble_resultants(
 
     x = ufl.SpatialCoordinate(mesh)
     R = np.zeros((6, 6))
-    for i in range(6):
-        sigma = ufl.dot(C_func, eps_totals[i])
+    for i, eps_total in eps_totals.items():
+        sigma = ufl.dot(C_func, eps_total)
         forms = [
             sigma[4],  # Vx
             sigma[3],  # Vy

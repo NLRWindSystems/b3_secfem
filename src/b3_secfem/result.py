@@ -62,6 +62,12 @@ class SectionResult(BaseModel):
     """
 
     u_solutions: list[Any] | None = None
+    shear_d1_solutions: list[Any] | None = None
+    """Corrected lower-chain warping fields for Fx and Fy (fenicsx).
+
+    These differ from the bending warping when bending couples to axial
+    extension or torsion, and must also be used for stress/strain recovery.
+    """
     inplane_shear_warping: Any | None = None
     """Backend-specific warping field (dolfinx Function or mfem GridFunction)
     for the 7th in-plane-shear cell problem. Used by viz.plot_warping."""

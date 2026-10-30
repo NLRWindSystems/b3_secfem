@@ -154,9 +154,13 @@ def recover_strains(result: SectionResult) -> StrainField:
             continue
         d0 = d0_kinematic(i, x)
         if i in STAGE2_MODES:
-            # shear: d_1 is the corresponding bending warping
+            # Reuse the solvability-corrected lower chain that built R and K.
             bending_idx = 4 if i == 0 else 3
-            d1 = primary[bending_idx]
+            d1 = (
+                result.shear_d1_solutions[i]
+                if result.shear_d1_solutions is not None
+                else primary[bending_idx]
+            )
             d2 = primary[i]
         else:
             d1 = primary[i]
